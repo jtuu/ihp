@@ -1,0 +1,10 @@
+{
+	"authors": [
+		"joona"
+	],
+	"copyright": "Copyright © 2019, joona",
+	"description": "Internet Honking Protocol",
+	"license": "GPL",
+	"name": "ihp",
+	"targetPath": "build"
+}
