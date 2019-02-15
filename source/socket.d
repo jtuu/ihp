@@ -1,62 +1,16 @@
+module socket;
+
+import common;
+import utils;
 import std.stdio : stderr, writeln, writefln;
-import std.format;
-import std.string;
-import std.conv;
-import core.sys.posix.arpa.inet;
 import core.sys.posix.netinet.in_;
 import core.sys.posix.unistd : os_write = write, os_read = read, os_close = close, STDOUT_FILENO;
-import core.sys.posix.netdb;
 import core.sys.posix.sys.select;
-import core.sys.posix.sys.time;
-import core.sys.linux.sys.socket;
+import core.sys.linux.sys.socket : os_socket = socket, PF_INET;
 import core.stdc.errno;
 import core.stdc.stdio : perror;
 import core.stdc.stdlib : abort, malloc, free, exit;
 import core.stdc.string : memset, memcpy, strerror;
-
-const MAX_INET_ADDRS = 6;
-
-enum CoreProtocol {
-	Unspecified,
-	IPv4,
-	IPv6
-}
-
-enum TransportProtocol {
-	Unspecified,
-	TCP,
-	UDP
-}
-
-struct Host4 {
-	string name;
-	string[] addrs;
-	in_addr[MAX_INET_ADDRS] iaddrs;
-}
-
-struct Host6 {
-	string name;
-	string[] addrs;
-	in6_addr[MAX_INET_ADDRS] iaddrs;
-}
-
-union Host {
-	Host4 host;
-	Host6 host6;
-}
-
-struct Port {
-	string name;
-	string ascnum;
-	ushort num;
-	in_port_t netnum;
-}
-
-struct Buffer {
-	ubyte *head;
-	ubyte *pos;
-	int len;
-}
 
 int socket_new(CoreProtocol core_prtcl, TransportProtocol trans_prtcl) {
 	int sock, ret, sys_core_prtcl, sys_sock_type, sock_opt;
@@ -85,7 +39,7 @@ int socket_new(CoreProtocol core_prtcl, TransportProtocol trans_prtcl) {
 			abort();
 	}
 	// create socket
-	sock = socket(sys_core_prtcl, sys_sock_type, 0);
+	sock = os_socket(sys_core_prtcl, sys_sock_type, 0);
 	if (sock < 0) { return -1; }
 	// disable linger
 	fix_linger.l_onoff = 1;
@@ -205,72 +159,13 @@ int socket_accept(int s, int timeout) {
 	return -1;
 }
 
-bool get_port(ref Port dst, string port_name, ushort port_num) {
-	immutable char *get_proto = toStringz("tcp");
-	servent *my_servent;
-	debug (2) { writefln("get_port(dst=%x, port_name=\"%s\", port_num=%d)", cast(void *) &dst, port_name, port_num); }
-	dst = Port.init;
-	if (empty(port_name)) {
-		if (port_num == 0) {
-			return false;
-		}
-		dst.num = port_num;
-		dst.netnum = htons(port_num);
-		my_servent = getservbyport(cast(int) dst.netnum, get_proto);
-		if (my_servent != null) {
-			assert(dst.netnum == my_servent.s_port);
-			dst.name = fromStringz(my_servent.s_name).idup;
-		}
-	} else {
-		long port;
-		try {
-			port = to!long(port_name);
-		} catch (ConvException ex) {}
-		if (port > 0 && port < 65536) {
-			return get_port(dst, null, cast(in_port_t) port);
-		}
-		my_servent = getservbyname(toStringz(port_name), get_proto);
-		if (my_servent != null) {
-			dst.name = fromStringz(my_servent.s_name).idup;
-			dst.netnum = cast(ushort) my_servent.s_port;
-			dst.num = ntohs(dst.netnum);
-		} else {
-			return false;
-		}
-	}
-	dst.ascnum = format("%d", dst.num);
-	return true;
-}
-
-string strid(const ref Host host, const ref Port port) {
-	string host_part = void;
-	if (host.host.iaddrs[0].s_addr != 0) {
-		if (empty(host.host.name)) {
-			host_part = format("%s", host.host.addrs[0]);
-		} else {
-			host_part = format("%s [%s]", host.host.name, host.host.addrs[0]);
-		}
-	} else {
-		host_part = "any";
-	}
-	if (empty(port.name)) {
-		return host_part ~ format(":(%s)", port.name);
-	} else {
-		return host_part ~ format(":%s", port.ascnum);
-	}
-}
-
-string ntop(ref in_addr src) {
-	static char[127] dst;
-	const char *ret = inet_ntop(AF_INET, cast(void *) &src, &dst[0], cast(uint) dst.sizeof);
-	return fromStringz(ret).idup;
-}
-
 struct Socket {
-	int fd;
-	int timeout;
+public:
 	CoreProtocol core_prtcl;
 	TransportProtocol trans_prtcl;
+protected:
+	int fd;
+	int timeout;
 	Host local;
 	Port local_port;
 	Host remote;
@@ -310,7 +205,14 @@ struct Socket {
 		return sock_accept;
 	}
 
-	int listen() {
+public:
+	this(CoreProtocol core_prtcl_, TransportProtocol trans_prtcl_) {
+		this.core_prtcl = core_prtcl_;
+		this.trans_prtcl = trans_prtcl_;
+	}
+
+	int listen(ushort port_num) {
+		get_port(this.local_port, "", port_num);
 		switch(this.trans_prtcl) {
 			case TransportProtocol.TCP:
 				return this.fd = this.tcp_listen();
@@ -401,19 +303,4 @@ struct Socket {
 		slave.fd = -1;
 		return 0;
 	}
-}
-
-void main() {
-	Socket stdio_sock = Socket();
-	Socket listen_sock = Socket();
-	Port *local_port = &listen_sock.local_port;
-	listen_sock.core_prtcl = CoreProtocol.IPv4;
-	listen_sock.trans_prtcl = TransportProtocol.TCP;
-	get_port(*local_port, "", 5555);
-	const int accept_ret = listen_sock.listen();
-	if (accept_ret < 0) {
-		stderr.writefln("Listen mode failed: %s", strerror(errno));
-		exit(1);
-	}
-	listen_sock.read(stdio_sock);
 }
