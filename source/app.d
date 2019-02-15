@@ -1,10 +1,10 @@
-import std.stdio;
+import std.stdio : stderr, writeln, writefln;
 import std.format;
 import std.string;
 import std.conv;
 import core.sys.posix.arpa.inet;
 import core.sys.posix.netinet.in_;
-import core.sys.posix.unistd;
+import core.sys.posix.unistd : os_write = write, os_read = read, os_close = close, STDOUT_FILENO;
 import core.sys.posix.netdb;
 import core.sys.posix.sys.select;
 import core.sys.posix.sys.time;
@@ -52,6 +52,12 @@ struct Port {
 	in_port_t netnum;
 }
 
+struct Buffer {
+	ubyte *head;
+	ubyte *pos;
+	int len;
+}
+
 int socket_new(CoreProtocol core_prtcl, TransportProtocol trans_prtcl) {
 	int sock, ret, sys_core_prtcl, sys_sock_type, sock_opt;
 	linger fix_linger;
@@ -86,14 +92,14 @@ int socket_new(CoreProtocol core_prtcl, TransportProtocol trans_prtcl) {
 	fix_linger.l_linger = 0;
 	ret = setsockopt(sock, SOL_SOCKET, SO_LINGER, &fix_linger, fix_linger.sizeof);
 	if (ret < 0) {
-		close(sock);
+		os_close(sock);
 		return -2;
 	}
 	// enable reuse address
 	sock_opt = 1;
 	ret = setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &sock_opt, sock_opt.sizeof);
 	if (ret < 0) {
-		close(sock);
+		os_close(sock);
 		return -2;
 	}
 	return sock;
@@ -160,7 +166,7 @@ int socket_new_listen(CoreProtocol core_prtcl, const Host *addr, const Port *por
 	err: {
 		// close socket, restore errno
 		const int saved_errno = errno,
-			temp_ret = close(sock);
+			temp_ret = os_close(sock);
 		assert(temp_ret >= 0);
 		errno = saved_errno;
 	}
@@ -269,6 +275,8 @@ struct Socket {
 	Port local_port;
 	Host remote;
 	Port port;
+	Buffer sendq;
+	Buffer recvq;
 	
 	int tcp_listen() {
 		int sock_listen, sock_accept;
@@ -285,7 +293,7 @@ struct Socket {
 			uint findport_len = findport.sizeof;
 			ret = getsockname(sock_listen, cast(sockaddr *) &findport, &findport_len);
 			if (ret < 0) {
-				close(sock_listen);
+				os_close(sock_listen);
 				return -1;
 			}
 			get_port(this.local_port, "", ntohs(findport.sin_port));
@@ -298,7 +306,7 @@ struct Socket {
 		getpeername(sock_accept, cast(sockaddr *) &my_addr, &my_addr_len);
 		get_port(this.port, null, ntohs(my_addr.sin_port));
 		debug (1) { writefln("Connection from %s:%d", ntop(my_addr.sin_addr), this.port.num); }
-		close(sock_listen);
+		os_close(sock_listen);
 		return sock_accept;
 	}
 
@@ -311,13 +319,94 @@ struct Socket {
 		}
 		return -1;
 	}
+
+	int read(ref Socket slave) {
+		int fd_stdout, fd_sock;
+		fd_set ins_set;
+		ubyte[1024] buf;
+		bool inloop = true;
+		debug (2) { writefln("socket.read(main=%x, slave=%x)", cast(void *) &this, cast(void *) &slave); }
+		fd_sock = this.fd;
+		assert(fd_sock >= 0);
+		fd_stdout = STDOUT_FILENO;
+		while (inloop) {
+			bool call_select = true;
+			FD_ZERO(&ins_set);
+			if (this.recvq.len == 0) {
+				debug (2) { writeln("Main recvq is empty"); }
+				FD_SET(fd_sock, &ins_set);
+			} else {
+				call_select = false;
+			}
+			if (call_select && FD_ISSET(fd_sock, &ins_set)) {
+				int read_ret = cast(int) os_read(fd_sock, cast(void *) buf, buf.sizeof);
+				debug (2) { writefln("read(net) = %d", read_ret); }
+				if (read_ret < 0) {
+					perror("read(net)");
+					exit(1);
+				} else if (read_ret == 0) {
+					debug (1) { writefln("EOF received from the net"); }
+					inloop = false;
+				} else {
+					this.recvq.len = read_ret;
+					this.recvq.head = null;
+					this.recvq.pos = &buf[0];
+				}
+				if (this.recvq.len > 0) {
+					Buffer *my_recvq = &this.recvq;
+					Buffer *rem_sendq = &slave.sendq;
+					if (my_recvq.len > 0) {
+						if (rem_sendq.len == 0) {
+							memcpy(rem_sendq, my_recvq, (*rem_sendq).sizeof);
+							memset(my_recvq, 0, (*my_recvq).sizeof);
+						} else if (my_recvq.head == null) {
+							my_recvq.head = cast(ubyte *) malloc(my_recvq.len);
+							memcpy(my_recvq.head, my_recvq.pos, my_recvq.len);
+							my_recvq.pos = my_recvq.head;
+						}
+					}
+				}
+				if (slave.sendq.len > 0) {
+					ubyte *data = slave.sendq.pos;
+					int data_len = slave.sendq.len;
+					Buffer * my_sendq = &slave.sendq;
+					int write_ret = cast(int) os_write(fd_stdout, data, data_len);
+					debug (2) { writefln("write(stdout) = %d", write_ret); }
+					if (write_ret < 0) {
+						perror("write(stdout)");
+						exit(1);
+					}
+					assert(write_ret > 0 && write_ret <= data_len);
+					if (write_ret < data_len) {
+						debug (1) { writefln("Only %d out of %d bytes were written to stdout", data_len, write_ret); }
+						data_len = write_ret;
+					}
+					my_sendq.len -= data_len;
+					my_sendq.pos += data_len;
+					debug (1) { writefln("%d bytes left in the queue", my_sendq.len); }
+					if (my_sendq.len == 0) {
+						free(my_sendq.head);
+						memset(my_sendq, 0, (*my_sendq).sizeof);
+					} else if (my_sendq.head == null) {
+						my_sendq.head = cast(ubyte *) malloc(my_sendq.len);
+						memcpy(my_sendq.head, my_sendq.pos, my_sendq.len);
+						my_sendq.pos = my_sendq.head;
+					}
+				}
+			}
+		}
+		shutdown(fd_sock, SHUT_RDWR);
+		os_close(fd_sock);
+		this.fd = -1;
+		slave.fd = -1;
+		return 0;
+	}
 }
 
 void main() {
+	Socket stdio_sock = Socket();
 	Socket listen_sock = Socket();
 	Port *local_port = &listen_sock.local_port;
-	const Host local_host = listen_sock.local;
-	const Host remote_host = listen_sock.remote;
 	listen_sock.core_prtcl = CoreProtocol.IPv4;
 	listen_sock.trans_prtcl = TransportProtocol.TCP;
 	get_port(*local_port, "", 5555);
@@ -326,4 +415,5 @@ void main() {
 		stderr.writefln("Listen mode failed: %s", strerror(errno));
 		exit(1);
 	}
+	listen_sock.read(stdio_sock);
 }
