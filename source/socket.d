@@ -1,5 +1,6 @@
 module socket;
 
+import sig;
 import common;
 import utils;
 import std.stdio : stderr, writeln, writefln;
@@ -231,8 +232,10 @@ public:
 		fd_sock = this.fd;
 		assert(fd_sock >= 0);
 		fd_stdout = STDOUT_FILENO;
+		handle_signals = false;
 		while (inloop) {
 			bool call_select = true;
+			if (got_sigint || got_sigterm) { break; }
 			FD_ZERO(&ins_set);
 			if (this.recvq.len == 0) {
 				debug (2) { writeln("Main recvq is empty"); }
@@ -301,6 +304,7 @@ public:
 		os_close(fd_sock);
 		this.fd = -1;
 		slave.fd = -1;
+		handle_signals = true;
 		return 0;
 	}
 }

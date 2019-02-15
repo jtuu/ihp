@@ -1,5 +1,6 @@
 module server;
 
+import sig;
 import common;
 import socket;
 import utils;
@@ -9,6 +10,7 @@ import core.stdc.errno;
 import core.stdc.stdlib : exit;
 
 void main() {
+	init_signal_handlers();
 	Socket stdio_sock = Socket();
 	Socket listen_sock = Socket(CoreProtocol.IPv4, TransportProtocol.TCP);
 	const int accept_ret = listen_sock.listen(5555);

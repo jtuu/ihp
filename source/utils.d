@@ -1,6 +1,7 @@
 module utils;
 
 import common;
+import std.stdio;
 import std.string;
 import std.conv;
 import core.sys.posix.netdb;
