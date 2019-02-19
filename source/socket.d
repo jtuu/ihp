@@ -8,6 +8,7 @@ import core.sys.posix.netinet.in_;
 import core.sys.posix.unistd : os_write = write, os_read = read, os_close = close, STDOUT_FILENO;
 import core.sys.posix.sys.select;
 import core.sys.linux.sys.socket : os_socket = socket, PF_INET;
+import core.sys.posix.fcntl : fcntl, F_GETFL, F_SETFL, O_NONBLOCK;
 import core.stdc.errno;
 import core.stdc.stdio : perror;
 import core.stdc.stdlib : abort, malloc, free, exit;
@@ -173,6 +174,7 @@ protected:
 	Port port;
 	Buffer sendq;
 	Buffer recvq;
+	bool closed;
 	
 	int tcp_listen() {
 		int sock_listen, sock_accept;
@@ -206,105 +208,116 @@ protected:
 		return sock_accept;
 	}
 
+	int set_nonblocking() {
+		const int flags = fcntl(this.fd, F_GETFL);
+		if (flags < 0) { return flags; }
+		return fcntl(this.fd, F_SETFL, flags | O_NONBLOCK);
+	}
+
 public:
 	this(CoreProtocol core_prtcl_, TransportProtocol trans_prtcl_) {
 		this.core_prtcl = core_prtcl_;
 		this.trans_prtcl = trans_prtcl_;
 	}
 
+	bool is_closed() {
+		return this.closed;
+	}
+
 	int listen(ushort port_num) {
 		get_port(this.local_port, "", port_num);
 		switch(this.trans_prtcl) {
 			case TransportProtocol.TCP:
-				return this.fd = this.tcp_listen();
+				const int listen_ret = this.tcp_listen();
+				if (listen_ret < 0) { return listen_ret; }
+				this.fd = listen_ret;
+				this.set_nonblocking();
+				return listen_ret;
 			default:
 				abort();
 		}
 		return -1;
 	}
 
-	int read(ref Socket slave) {
-		int fd_stdout, fd_sock;
-		fd_set ins_set;
-		ubyte[1024] buf;
-		bool inloop = true;
+	void read(ref Socket slave) {
+		static const int fd_stdout = STDOUT_FILENO;
+		static fd_set ins_set;
+		static ubyte[1024] buf;
 		debug (2) { writefln("socket.read(main=%x, slave=%x)", cast(void *) &this, cast(void *) &slave); }
-		fd_sock = this.fd;
-		assert(fd_sock >= 0);
-		fd_stdout = STDOUT_FILENO;
-		handle_signals = false;
-		while (inloop) {
-			bool call_select = true;
-			if (got_sigint || got_sigterm) { break; }
-			FD_ZERO(&ins_set);
-			if (this.recvq.len == 0) {
-				debug (2) { writeln("Main recvq is empty"); }
-				FD_SET(fd_sock, &ins_set);
-			} else {
-				call_select = false;
-			}
-			if (call_select && FD_ISSET(fd_sock, &ins_set)) {
-				int read_ret = cast(int) os_read(fd_sock, cast(void *) buf, buf.sizeof);
-				debug (2) { writefln("read(net) = %d", read_ret); }
-				if (read_ret < 0) {
+		assert(!this.closed);
+		assert(this.fd >= 0);
+		bool call_select = true;
+		FD_ZERO(&ins_set);
+		if (this.recvq.len == 0) {
+			debug (2) { writeln("Main recvq is empty"); }
+			FD_SET(this.fd, &ins_set);
+		} else {
+			call_select = false;
+		}
+		if (call_select && FD_ISSET(this.fd, &ins_set)) {
+			int read_ret = cast(int) os_read(this.fd, cast(void *) buf, buf.sizeof);
+			debug (2) { writefln("read(net) = %d", read_ret); }
+			if (read_ret < 0) {
+				if (errno != EAGAIN) {
 					perror("read(net)");
 					exit(1);
-				} else if (read_ret == 0) {
-					debug (1) { writefln("EOF received from the net"); }
-					inloop = false;
-				} else {
-					this.recvq.len = read_ret;
-					this.recvq.head = null;
-					this.recvq.pos = &buf[0];
 				}
-				if (this.recvq.len > 0) {
-					Buffer *my_recvq = &this.recvq;
-					Buffer *rem_sendq = &slave.sendq;
-					if (my_recvq.len > 0) {
-						if (rem_sendq.len == 0) {
-							memcpy(rem_sendq, my_recvq, (*rem_sendq).sizeof);
-							memset(my_recvq, 0, (*my_recvq).sizeof);
-						} else if (my_recvq.head == null) {
-							my_recvq.head = cast(ubyte *) malloc(my_recvq.len);
-							memcpy(my_recvq.head, my_recvq.pos, my_recvq.len);
-							my_recvq.pos = my_recvq.head;
-						}
+			} else if (read_ret == 0) {
+				debug (1) { writefln("EOF received from the net"); }
+				return this.close();
+			} else {
+				this.recvq.len = read_ret;
+				this.recvq.head = null;
+				this.recvq.pos = &buf[0];
+			}
+			if (this.recvq.len > 0) {
+				Buffer *my_recvq = &this.recvq;
+				Buffer *rem_sendq = &slave.sendq;
+				if (my_recvq.len > 0) {
+					if (rem_sendq.len == 0) {
+						memcpy(rem_sendq, my_recvq, (*rem_sendq).sizeof);
+						memset(my_recvq, 0, (*my_recvq).sizeof);
+					} else if (my_recvq.head == null) {
+						my_recvq.head = cast(ubyte *) malloc(my_recvq.len);
+						memcpy(my_recvq.head, my_recvq.pos, my_recvq.len);
+						my_recvq.pos = my_recvq.head;
 					}
 				}
-				if (slave.sendq.len > 0) {
-					ubyte *data = slave.sendq.pos;
-					int data_len = slave.sendq.len;
-					Buffer * my_sendq = &slave.sendq;
-					int write_ret = cast(int) os_write(fd_stdout, data, data_len);
-					debug (2) { writefln("write(stdout) = %d", write_ret); }
-					if (write_ret < 0) {
-						perror("write(stdout)");
-						exit(1);
-					}
-					assert(write_ret > 0 && write_ret <= data_len);
-					if (write_ret < data_len) {
-						debug (1) { writefln("Only %d out of %d bytes were written to stdout", data_len, write_ret); }
-						data_len = write_ret;
-					}
-					my_sendq.len -= data_len;
-					my_sendq.pos += data_len;
-					debug (1) { writefln("%d bytes left in the queue", my_sendq.len); }
-					if (my_sendq.len == 0) {
-						free(my_sendq.head);
-						memset(my_sendq, 0, (*my_sendq).sizeof);
-					} else if (my_sendq.head == null) {
-						my_sendq.head = cast(ubyte *) malloc(my_sendq.len);
-						memcpy(my_sendq.head, my_sendq.pos, my_sendq.len);
-						my_sendq.pos = my_sendq.head;
-					}
+			}
+			if (slave.sendq.len > 0) {
+				ubyte *data = slave.sendq.pos;
+				int data_len = slave.sendq.len;
+				Buffer * my_sendq = &slave.sendq;
+				int write_ret = cast(int) os_write(fd_stdout, data, data_len);
+				debug (2) { writefln("write(stdout) = %d", write_ret); }
+				if (write_ret < 0) {
+					perror("write(stdout)");
+					exit(1);
+				}
+				assert(write_ret > 0 && write_ret <= data_len);
+				if (write_ret < data_len) {
+					debug (1) { writefln("Only %d out of %d bytes were written to stdout", data_len, write_ret); }
+					data_len = write_ret;
+				}
+				my_sendq.len -= data_len;
+				my_sendq.pos += data_len;
+				debug (1) { writefln("%d bytes left in the queue", my_sendq.len); }
+				if (my_sendq.len == 0) {
+					free(my_sendq.head);
+					memset(my_sendq, 0, (*my_sendq).sizeof);
+				} else if (my_sendq.head == null) {
+					my_sendq.head = cast(ubyte *) malloc(my_sendq.len);
+					memcpy(my_sendq.head, my_sendq.pos, my_sendq.len);
+					my_sendq.pos = my_sendq.head;
 				}
 			}
 		}
-		shutdown(fd_sock, SHUT_RDWR);
-		os_close(fd_sock);
+	}
+
+	void close() {
+		shutdown(this.fd, SHUT_RDWR);
+		os_close(this.fd);
 		this.fd = -1;
-		slave.fd = -1;
-		handle_signals = true;
-		return 0;
+		this.closed = true;
 	}
 }
