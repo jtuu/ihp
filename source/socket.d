@@ -7,7 +7,6 @@ import std.stdio : stderr, writeln, writefln;
 import core.sys.posix.netinet.in_;
 import core.sys.posix.unistd : os_write = write, os_read = read, os_close = close;
 import core.sys.posix.sys.select;
-import core.sys.posix.poll;
 import core.sys.linux.sys.socket : os_socket = socket, PF_INET;
 import core.sys.posix.fcntl : fcntl, F_GETFL, F_SETFL, O_NONBLOCK;
 import core.stdc.errno;
@@ -166,7 +165,6 @@ struct Socket {
 public:
     CoreProtocol core_prtcl;
     TransportProtocol trans_prtcl;
-    pollfd pfd;
 protected:
     int fd;
     int timeout;

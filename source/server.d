@@ -6,6 +6,7 @@ import socket;
 import utils;
 import std.stdio : stderr, writefln, writeln;
 import std.concurrency;
+import core.time;
 import core.sys.posix.poll;
 import core.stdc.string : strerror;
 import core.stdc.errno;
@@ -19,9 +20,10 @@ __gshared Socket[MAX_SOCKS] socks = void;
 __gshared pollfd[MAX_SOCKS] pfds = void;
 
 struct StopMessage {}
+struct SocketAddedMessage {}
 
 // listen for new sockets
-void listener_worker() {
+void listener_worker(Tid parent) {
     debug (1) { writeln("Listener started"); }
     while (true) {
         while (num_socks < MAX_SOCKS) {
@@ -34,6 +36,7 @@ void listener_worker() {
             socks[num_socks] = listen_sock;
             pfds[num_socks] = pollfd(listen_sock.get_fd(), POLLIN, 0);
             num_socks++;
+            send(parent, SocketAddedMessage());
         }
         debug (2) { writefln("Listener: %d/%d sockets, attempting to make space", num_socks, MAX_SOCKS); }
         // socket storage filled up
@@ -74,37 +77,50 @@ void listener_worker() {
 // read/write from/to sockets
 void readwrite_worker(Tid parent) {
     const int poll_timeout = 10; // ms
+    const Duration socket_wait_timeout = poll_timeout.msecs;
     handle_signals = false; // prevent exit so that we can close the sockets gracefully
     Socket slave = Socket(); // slave is just used to hold the readwrite buffer
     // loop through all sockets forever
     while (true) {
+        int num_closed = 0;
         const bool stopping = got_sigint || got_sigterm; // should all sockets be closed
-        int poll_ret = poll(&pfds[0], num_socks, poll_timeout); // find out which sockets can be read
-        debug (3) { writefln("poll(readwrite) = %d", poll_ret); }
-        if (poll_ret < 0) {
-            perror("poll(readwrite)");
-            exit(1);
-        }
-        // loop through sockets if at least one socket has something to read or we are stopping
-        else if (poll_ret > 0 || stopping) {
-            for (int i = 0; i < num_socks; i++) {
-                Socket *sock = &socks[i];
-                // try read from socket if we're not stopping and socket can be read
-                if (stopping) {
-                    sock.close();
-                } else if (!sock.is_closed() && (pfds[i].revents & POLLIN)) {
-                    // if something was read then write it to all other sockets
-                    if (sock.read(slave)) {
-                        for (int j = 0; j < num_socks; j++) {
-                            Socket *other = &socks[j];
-                            // don't echo
-                            if (j != i && !other.is_closed()) {
-                                other.write(slave);
+        // wait for sockets if there are none
+        if (num_socks == 0) {
+            receiveTimeout(socket_wait_timeout, (SocketAddedMessage _) {});
+        } else {
+            int poll_ret = poll(&pfds[0], num_socks, poll_timeout); // find out which sockets can be read
+            debug (3) { writefln("poll(readwrite) = %d", poll_ret); }
+            if (poll_ret < 0) {
+                perror("poll(readwrite)");
+                exit(1);
+            }
+            // loop through sockets if at least one socket has something to read or we are stopping
+            else if (poll_ret > 0 || stopping) {
+                for (int i = 0; i < num_socks; i++) {
+                    Socket *sock = &socks[i];
+                    // try read from socket if we're not stopping and socket can be read
+                    if (stopping) {
+                        sock.close();
+                    } else if (sock.is_closed()) {
+                        num_closed++;
+                    } else if (pfds[i].revents & POLLIN) {
+                        // if something was read then write it to all other sockets
+                        if (sock.read(slave)) {
+                            for (int j = 0; j < num_socks; j++) {
+                                Socket *other = &socks[j];
+                                // don't echo
+                                if (j != i && !other.is_closed()) {
+                                    other.write(slave);
+                                }
                             }
+                            slave.clear();
                         }
-                        slave.clear();
                     }
                 }
+            }
+            // all sockets are closed which means we can free all of them
+            if (num_closed == num_socks) {
+                num_socks = 0;
             }
         }
         if (stopping) { break; }
@@ -115,11 +131,16 @@ void readwrite_worker(Tid parent) {
 
 void main() {
     init_signal_handlers();
-    spawn(&listener_worker);
-    spawn(&readwrite_worker, thisTid); // this thread handles signals because it needs to exit gracefully
-    receive (
-        (StopMessage _) {
-            exit(1);
-        }
-    );
+    spawn(&listener_worker, thisTid);
+    Tid readwrite = spawn(&readwrite_worker, thisTid); // this thread handles signals because it needs to exit gracefully
+    while (true) {
+        receive (
+            (StopMessage _) {
+                exit(1);
+            },
+            (SocketAddedMessage msg) {
+                send(readwrite, msg);
+            }
+        );
+    }
 }
