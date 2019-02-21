@@ -1,12 +1,12 @@
 {
-	"authors": [
-		"joona"
-	],
-	"copyright": "Copyright © 2019, joona",
-	"description": "Internet Honking Protocol",
-	"license": "GPL-3.0",
-	"name": "ihp",
-	"targetPath": "build",
-	"mainSourceFile": "source/server.d",
-	"targetType": "executable"
+    "authors": [
+        "joona"
+    ],
+    "copyright": "Copyright © 2019, joona",
+    "description": "Internet Honking Protocol",
+    "license": "GPL-3.0",
+    "name": "ihp",
+    "targetPath": "build",
+    "mainSourceFile": "source/server.d",
+    "targetType": "executable"
 }
