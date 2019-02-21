@@ -7,6 +7,7 @@ import std.stdio : stderr, writeln, writefln;
 import core.sys.posix.netinet.in_;
 import core.sys.posix.unistd : os_write = write, os_read = read, os_close = close;
 import core.sys.posix.sys.select;
+import core.sys.posix.poll;
 import core.sys.linux.sys.socket : os_socket = socket, PF_INET;
 import core.sys.posix.fcntl : fcntl, F_GETFL, F_SETFL, O_NONBLOCK;
 import core.stdc.errno;
@@ -165,6 +166,7 @@ struct Socket {
 public:
 	CoreProtocol core_prtcl;
 	TransportProtocol trans_prtcl;
+	pollfd pfd;
 protected:
 	int fd;
 	int timeout;
@@ -224,6 +226,10 @@ public:
 		return this.closed;
 	}
 
+	int get_fd() {
+		return this.fd;
+	}
+
 	int listen(ushort port_num) {
 		get_port(this.local_port, "", port_num);
 		switch(this.trans_prtcl) {
@@ -231,7 +237,6 @@ public:
 				const int listen_ret = this.tcp_listen();
 				if (listen_ret < 0) { return listen_ret; }
 				this.fd = listen_ret;
-				this.set_nonblocking();
 				return listen_ret;
 			default:
 				abort();
@@ -239,7 +244,6 @@ public:
 		return -1;
 	}
 
-	// read (nonblocking) from this socket and copy the buffer into slave
 	// returns true if something was read
 	bool read(ref Socket slave) {
 		static ubyte[1024] buf;
@@ -248,15 +252,12 @@ public:
 		assert(this.fd >= 0);
 		bool was_read = false;
 		int read_ret = cast(int) os_read(this.fd, cast(void *) buf, buf.sizeof);
-		debug (3) { writefln("read(net) = %d", read_ret); }
+		debug (3) { writefln("read(sock) = %d", read_ret); }
 		if (read_ret < 0) {
-			// EAGAIN means there was nothing to read if we are in nonblocking mode
-			if (errno != EAGAIN) {
-				perror("read(net)");
-				exit(1);
-			}
+			perror("read(sock)");
+			exit(1);
 		} else if (read_ret == 0) {
-			debug (1) { writefln("EOF received from the net"); }
+			debug (1) { writefln("EOF received from the socket"); }
 			this.close();
 			return false;
 		} else {
