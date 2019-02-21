@@ -1,6 +1,9 @@
 module common;
 
 import core.sys.posix.netinet.in_;
+import std.stdio : writefln;
+import core.stdc.stdlib : free;
+import core.stdc.string : memset;
 
 const MAX_INET_ADDRS = 6;
 
@@ -44,4 +47,11 @@ struct Buffer {
     ubyte *head;
     ubyte *pos;
     int len;
+
+	void clear() {
+        if (this.head != null) {
+            free(this.head);
+        }
+        memset(&this, 0, this.sizeof);
+    }
 }

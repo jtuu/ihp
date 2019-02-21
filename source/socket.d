@@ -243,9 +243,9 @@ public:
     }
 
     // returns true if something was read
-    bool read(ref Socket slave) {
+    bool read(ref Buffer output) {
         static ubyte[1024] buf;
-        debug (3) { writefln("socket.read(main=%x, slave=%x)", cast(void *) &this, cast(void *) &slave); }
+        debug (3) { writefln("socket.read(main=%x)", cast(void *) &this); }
         assert(!this.closed);
         assert(this.fd >= 0);
         bool was_read = false;
@@ -265,12 +265,11 @@ public:
             this.recvq.pos = &buf[0];
             was_read = true;
         }
-        // copy read data if any to slave
+        // copy read data if any to output
         if (this.recvq.len > 0) {
             Buffer *my_recvq = &this.recvq;
-            Buffer *rem_sendq = &slave.sendq;
-            if (rem_sendq.len == 0) {
-                memcpy(rem_sendq, my_recvq, (*rem_sendq).sizeof);
+            if (output.len == 0) {
+                memcpy(&output, my_recvq, output.sizeof);
                 memset(my_recvq, 0, (*my_recvq).sizeof);
             } else if (my_recvq.head == null) {
                 my_recvq.head = cast(ubyte *) malloc(my_recvq.len);
@@ -281,11 +280,11 @@ public:
         return was_read;
     }
 
-    // write data from slave to this socket
-    void write(ref Socket slave) {
-        if (slave.sendq.len > 0) {
-            ubyte *data = slave.sendq.pos;
-            int data_len = slave.sendq.len;
+    // write data to this socket
+    void write(ref Buffer input) {
+        if (input.len > 0) {
+            ubyte *data = input.pos;
+            int data_len = input.len;
             int write_ret = cast(int) os_write(this.fd, data, data_len);
             debug (2) { writefln("write(sock) = %d", write_ret); }
             if (write_ret < 0) {
@@ -297,14 +296,6 @@ public:
                 debug (1) { writefln("Only %d out of %d bytes were written to socket", data_len, write_ret); }
             }
         }
-    }
-
-    void clear() {
-        debug (2) { writefln("clear: %d bytes left in the write queue", this.sendq.len); }
-        if (this.sendq.head != null) {
-            free(this.sendq.head);
-        }
-        memset(&this.sendq, 0, this.sendq.sizeof);
     }
 
     void close() {

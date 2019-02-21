@@ -79,7 +79,7 @@ void readwrite_worker(Tid parent) {
     const int poll_timeout = 10; // ms
     const Duration socket_wait_timeout = poll_timeout.msecs;
     handle_signals = false; // prevent exit so that we can close the sockets gracefully
-    Socket slave = Socket(); // slave is just used to hold the readwrite buffer
+    Buffer msg_buf = Buffer();
     // loop through all sockets forever
     while (true) {
         int num_closed = 0;
@@ -105,15 +105,15 @@ void readwrite_worker(Tid parent) {
                         num_closed++;
                     } else if (pfds[i].revents & POLLIN) {
                         // if something was read then write it to all other sockets
-                        if (sock.read(slave)) {
+                        if (sock.read(msg_buf)) {
                             for (int j = 0; j < num_socks; j++) {
                                 Socket *other = &socks[j];
                                 // don't echo
                                 if (j != i && !other.is_closed()) {
-                                    other.write(slave);
+                                    other.write(msg_buf);
                                 }
                             }
-                            slave.clear();
+                            msg_buf.clear();
                         }
                     }
                 }
