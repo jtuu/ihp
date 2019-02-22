@@ -17,7 +17,7 @@ import core.stdc.stdlib : exit;
 // quick and dirty way to store the sockets
 immutable int MAX_SOCKS = 128;
 shared int num_socks = 0;
-__gshared Socket[MAX_SOCKS] socks = void;
+__gshared Socket*[MAX_SOCKS] socks = void;
 __gshared pollfd[MAX_SOCKS] pfds = void;
 
 struct StopMessage {}
@@ -29,7 +29,7 @@ void listener_worker(Tid parent) {
     while (true) {
         while (num_socks < MAX_SOCKS) {
             const int num_socks_now = num_socks;
-            Socket listen_sock = Socket(CoreProtocol.IPv4, TransportProtocol.TCP);
+            Socket *listen_sock = new Socket(CoreProtocol.IPv4, TransportProtocol.TCP);
             const int accept_ret = listen_sock.listen(5555);
             if (accept_ret < 0) {
                 stderr.writefln("Listen failed: %s", strerror(errno));
@@ -37,6 +37,7 @@ void listener_worker(Tid parent) {
             }
             socks[num_socks_now] = listen_sock;
             pfds[num_socks_now] = pollfd(listen_sock.get_fd(), POLLIN, 0);
+            listen_sock.pfd = &pfds[num_socks_now];
             num_socks.atomicOp!"+="(1);
             send(parent, SocketAddedMessage());
         }
@@ -52,6 +53,8 @@ void listener_worker(Tid parent) {
             // range continues
             if (cur_closed) {
                 move_len++;
+                destroy!false(socks[i]);
+                destroy!false(pfds[i]);
             }
             // range ends at current index
             if (cur_closed && !next_closed) {
@@ -100,7 +103,7 @@ void readwrite_worker(Tid parent) {
             // loop through sockets if at least one socket has something to read or we are stopping
             else if (poll_ret > 0 || stopping) {
                 for (int i = 0; i < num_socks_now; i++) {
-                    Socket *sock = &socks[i];
+                    Socket *sock = socks[i];
                     // try read from socket if we're not stopping and socket can be read
                     if (stopping) {
                         sock.close();
@@ -110,7 +113,7 @@ void readwrite_worker(Tid parent) {
                         // if something was read then write it to all other sockets
                         if (sock.read(msg_buf)) {
                             for (int j = 0; j < num_socks_now; j++) {
-                                Socket *other = &socks[j];
+                                Socket *other = socks[j];
                                 // don't echo
                                 if (j != i && !other.is_closed()) {
                                     other.write(msg_buf);
@@ -122,7 +125,12 @@ void readwrite_worker(Tid parent) {
                 }
             }
             // all sockets are closed which means we can free all of them
-            cas(&num_socks, num_closed, 0);
+            if(cas(&num_socks, num_closed, 0)) {
+                for (int i = 0; i < num_closed; i++) {
+                    destroy!false(socks[i]);
+                    destroy!false(pfds[i]);
+                }
+            }
         }
         if (stopping) { break; }
     }
