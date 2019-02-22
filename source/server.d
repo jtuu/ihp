@@ -7,6 +7,7 @@ import utils;
 import std.stdio : stderr, writefln, writeln;
 import std.concurrency;
 import core.time;
+import core.atomic : atomicOp, cas;
 import core.sys.posix.poll;
 import core.stdc.string : strerror;
 import core.stdc.errno;
@@ -15,7 +16,7 @@ import core.stdc.stdlib : exit;
 
 // quick and dirty way to store the sockets
 immutable int MAX_SOCKS = 128;
-__gshared int num_socks = 0;
+shared int num_socks = 0;
 __gshared Socket[MAX_SOCKS] socks = void;
 __gshared pollfd[MAX_SOCKS] pfds = void;
 
@@ -27,15 +28,16 @@ void listener_worker(Tid parent) {
     debug (1) { writeln("Listener started"); }
     while (true) {
         while (num_socks < MAX_SOCKS) {
+            const int num_socks_now = num_socks;
             Socket listen_sock = Socket(CoreProtocol.IPv4, TransportProtocol.TCP);
             const int accept_ret = listen_sock.listen(5555);
             if (accept_ret < 0) {
                 stderr.writefln("Listen failed: %s", strerror(errno));
                 exit(1);
             }
-            socks[num_socks] = listen_sock;
-            pfds[num_socks] = pollfd(listen_sock.get_fd(), POLLIN, 0);
-            num_socks++;
+            socks[num_socks_now] = listen_sock;
+            pfds[num_socks_now] = pollfd(listen_sock.get_fd(), POLLIN, 0);
+            num_socks.atomicOp!"+="(1);
             send(parent, SocketAddedMessage());
         }
         debug (2) { writefln("Listener: %d/%d sockets, attempting to make space", num_socks, MAX_SOCKS); }
@@ -67,7 +69,7 @@ void listener_worker(Tid parent) {
         if (move_len == MAX_SOCKS - 1) {
             total_removed = MAX_SOCKS;
         }
-        num_socks -= total_removed;
+        num_socks.atomicOp!"-="(total_removed);
         debug (2) { writefln("Listener: %d closed socket(s) removed", total_removed); }
         if (total_removed == 0) { break; } // TODO: do something smarter than just stop
     }
@@ -82,13 +84,14 @@ void readwrite_worker(Tid parent) {
     Buffer msg_buf = Buffer();
     // loop through all sockets forever
     while (true) {
+        const int num_socks_now = num_socks;
         int num_closed = 0;
         const bool stopping = got_sigint || got_sigterm; // should all sockets be closed
         // wait for sockets if there are none
-        if (num_socks == 0) {
+        if (num_socks_now == 0) {
             receiveTimeout(socket_wait_timeout, (SocketAddedMessage _) {});
         } else {
-            int poll_ret = poll(&pfds[0], num_socks, poll_timeout); // find out which sockets can be read
+            int poll_ret = poll(&pfds[0], num_socks_now, poll_timeout); // find out which sockets can be read
             debug (3) { writefln("poll(readwrite) = %d", poll_ret); }
             if (poll_ret < 0) {
                 perror("poll(readwrite)");
@@ -96,7 +99,7 @@ void readwrite_worker(Tid parent) {
             }
             // loop through sockets if at least one socket has something to read or we are stopping
             else if (poll_ret > 0 || stopping) {
-                for (int i = 0; i < num_socks; i++) {
+                for (int i = 0; i < num_socks_now; i++) {
                     Socket *sock = &socks[i];
                     // try read from socket if we're not stopping and socket can be read
                     if (stopping) {
@@ -106,7 +109,7 @@ void readwrite_worker(Tid parent) {
                     } else if (pfds[i].revents & POLLIN) {
                         // if something was read then write it to all other sockets
                         if (sock.read(msg_buf)) {
-                            for (int j = 0; j < num_socks; j++) {
+                            for (int j = 0; j < num_socks_now; j++) {
                                 Socket *other = &socks[j];
                                 // don't echo
                                 if (j != i && !other.is_closed()) {
@@ -119,9 +122,7 @@ void readwrite_worker(Tid parent) {
                 }
             }
             // all sockets are closed which means we can free all of them
-            if (num_closed == num_socks) {
-                num_socks = 0;
-            }
+            cas(&num_socks, num_closed, 0);
         }
         if (stopping) { break; }
     }
