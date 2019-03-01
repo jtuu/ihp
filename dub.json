@@ -2,11 +2,30 @@
     "authors": [
         "joona"
     ],
+    "configurations": [
+        {
+            "excludedSourceFiles": [
+                "source/client.d"
+            ],
+            "mainSourceFile": "source/server.d",
+            "name": "ihp_server",
+            "targetName": "ihp_server",
+            "targetPath": "build",
+            "targetType": "executable"
+        },
+        {
+            "excludedSourceFiles": [
+                "source/server.d"
+            ],
+            "mainSourceFile": "source/client.d",
+            "name": "ihp_client",
+            "targetName": "ihp_client",
+            "targetPath": "build",
+            "targetType": "executable"
+        }
+    ],
     "copyright": "Copyright © 2019, joona",
     "description": "Internet Honking Protocol",
     "license": "GPL-3.0",
-    "name": "ihp",
-    "targetPath": "build",
-    "mainSourceFile": "source/server.d",
-    "targetType": "executable"
+    "name": "ihp"	
 }
