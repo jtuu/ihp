@@ -4,6 +4,7 @@ import sig;
 import common;
 import utils;
 import std.stdio : stderr, writeln, writefln;
+import std.string;
 import core.sys.posix.netinet.in_;
 import core.sys.posix.unistd : os_write = write, os_read = read, os_close = close;
 import core.sys.posix.sys.select;
@@ -304,7 +305,7 @@ protected:
                 exit(1);
             }
             assert(get_len == get_ret.sizeof);
-            debug (2) { ("Connection returned errcode=%d (%s)", get_ret, fromStringz(strerror(get_ret))); }
+            debug (2) { writefln("Connection returned errcode=%d (%s)", get_ret, fromStringz(strerror(get_ret))); }
             if (get_ret > 0) {
                 // expecting eof
                 byte temp;

@@ -5,6 +5,7 @@ import common;
 import socket;
 import utils;
 import std.stdio : stderr, writefln, writeln;
+import std.string;
 import std.concurrency;
 import core.time;
 import core.atomic : atomicOp, cas;
