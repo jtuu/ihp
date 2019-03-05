@@ -21,13 +21,13 @@ enum TransportProtocol {
 
 struct Host4 {
     string name;
-    string[] addrs;
+    string[MAX_INET_ADDRS] addrs;
     in_addr[MAX_INET_ADDRS] iaddrs;
 }
 
 struct Host6 {
     string name;
-    string[] addrs;
+    string[MAX_INET_ADDRS] addrs;
     in6_addr[MAX_INET_ADDRS] iaddrs;
 }
 
