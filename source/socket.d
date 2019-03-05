@@ -162,6 +162,64 @@ int socket_accept(int s, int timeout) {
     return -1;
 }
 
+int socket_new_connect(
+    CoreProtocol core_prtcl,
+    TransportProtocol trans_prtcl,
+    const in_addr *addr,
+    in_port_t port,
+    const in_addr *local_addr,
+    in_port_t local_port) {
+    assert(addr != null);
+    const int my_family = AF_INET;
+    int sock, ret;
+    sockaddr_in rem_addr;
+    debug (1) { writefln("socket_new_connect(addr=%x, port=%d, local_addr=%x, local_port=%x)",
+                    cast(void *) &addr, ntohs(port), cast(void *) &local_addr, ntohs(local_port)); }
+    rem_addr.sin_family = my_family;
+    rem_addr.sin_port = port;
+    memcpy(&rem_addr.sin_addr, addr, rem_addr.sin_addr.sizeof);
+    sock = socket_new(core_prtcl, trans_prtcl);
+    if (sock < 0) { return sock; }
+    // bind to local address if specified
+    if (local_addr != null || local_port) {
+        sockaddr_in my_addr;
+        my_addr.sin_family = my_family;
+        my_addr.sin_port = local_port;
+        if (local_addr != null) {
+            memcpy(&my_addr.sin_addr, local_addr, my_addr.sin_addr.sizeof);
+        }
+        ret = bind(sock, cast(sockaddr *) &my_addr, my_addr.sizeof);
+        if (ret < 0) {
+            ret = -3;
+            goto err;
+        }
+    }
+    // set nonblocking
+    if ((ret = fcntl(sock, F_GETFL, 0)) >= 0) {
+        ret = fcntl(sock, F_SETFL, ret | O_NONBLOCK);
+    }
+    if (ret < 0) {
+        ret = -4;
+        goto err;
+    }
+    // should instantly return EINPROGRESS because of nonblocking
+    ret = connect(sock, cast(sockaddr *) &rem_addr, rem_addr.sizeof);
+    if (ret < 0 && errno != EINPROGRESS) {
+        ret = -5;
+        goto err;
+    }
+    return sock;
+
+    err: {
+        // close sock, restore errno
+        const int saved_errno = errno,
+            temp_ret = os_close(sock);
+        assert(temp_ret >= 0);
+        errno = saved_errno;
+    }
+    return ret;
+}
+
 struct Socket {
 public:
     CoreProtocol core_prtcl;
@@ -210,6 +268,67 @@ protected:
         return sock_accept;
     }
 
+    int tcp_connect() {
+        int ret, sock;
+        timeval timest;
+        fd_set outs;
+        debug (2) { writefln("tcp_connect(sock=%x)", cast(void *) &this); }
+        // create sock
+        sock = socket_new_connect(
+            this.core_prtcl,
+            this.trans_prtcl,
+            &this.remote.host.iaddrs[0],
+            this.port.netnum,
+            this.local.host.iaddrs[0].s_addr ?
+                &this.local.host.iaddrs[0] :
+                null,
+            this.local_port.netnum);
+        if (sock < 0) {
+            stderr.writefln("Couldn't create connection (err=%d): %s", sock, strerror(errno));
+            exit(1);
+        }
+        // wait for something to happen
+        FD_ZERO(&outs);
+        FD_SET(sock, &outs);
+        timest.tv_sec = this.timeout;
+        timest.tv_usec = 0;
+        ret = select(sock + 1, null, &outs, null, this.timeout > 0 ? &timest : null);
+        if (ret > 0) {
+            // check socket errors
+            int get_ret;
+            uint get_len = get_ret.sizeof;
+            assert(FD_ISSET(sock, &outs));
+            ret = getsockopt(sock, SOL_SOCKET, SO_ERROR, &get_ret, &get_len);
+            if (ret < 0) {
+                stderr.writefln("Critical system request failed: %s", strerror(errno));
+                exit(1);
+            }
+            assert(get_len == get_ret.sizeof);
+            debug (2) { ("Connection returned errcode=%d (%s)", get_ret, strerror(get_ret)); }
+            if (get_ret > 0) {
+                // expecting eof
+                byte temp;
+                ret = cast(int) os_read(sock, &temp, 1);
+                assert(ret == 0);
+                this.close();
+                errno = get_ret;
+                return -1;
+            }
+            // success
+            debug (1) { writefln("%s open", strid(this.remote, this.port)); }
+            return sock;
+        }
+        // select failed
+        else if (ret < 0) {
+            if (errno != EINTR) { stderr.writefln("Critical system request failed: %s", strerror(errno)); }
+            exit(1);
+        }
+        // select timed out
+        this.close();
+        errno = ETIMEDOUT;
+        return -1;
+    }
+
     int set_nonblocking() {
         const int flags = fcntl(this.fd, F_GETFL);
         if (flags < 0) { return flags; }
@@ -232,12 +351,28 @@ public:
 
     int listen(ushort port_num) {
         get_port(this.local_port, "", port_num);
-        switch(this.trans_prtcl) {
+        switch (this.trans_prtcl) {
             case TransportProtocol.TCP:
                 const int listen_ret = this.tcp_listen();
                 if (listen_ret < 0) { return listen_ret; }
                 this.fd = listen_ret;
                 return listen_ret;
+            default:
+                abort();
+        }
+        return -1;
+    }
+
+    int connect(const string hostname, ushort port_num) {
+        if (!resolve_host(this.remote, hostname) || !get_port(this.port, "", port_num)) {
+            return -1;
+        }
+        switch (this.trans_prtcl) {
+            case TransportProtocol.TCP:
+                const int connect_ret = this.tcp_connect();
+                if (connect_ret < 0) { return connect_ret; }
+                this.fd = connect_ret;
+                return connect_ret;
             default:
                 abort();
         }
@@ -255,7 +390,8 @@ public:
         debug (3) { writefln("read(sock) = %d", read_ret); }
         if (read_ret < 0) {
             perror("read(sock)");
-            exit(1);
+            this.close();
+            return false;
         } else if (read_ret == 0) {
             debug (1) { writefln("EOF received from the socket"); }
             this.close();
