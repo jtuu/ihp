@@ -241,7 +241,7 @@ protected:
         debug (2) { writefln("tcp_listen(sock=%x)", cast(void *) &this); }
         sock_listen = socket_new_listen(this.core_prtcl, &this.local, &this.local_port);
         if (sock_listen < 0) {
-            stderr.writefln("Couldn't setup listening socket (err=%d): %s", sock_listen, strerror(errno));
+            stderr.writefln("Couldn't setup listening socket (err=%d): %s", sock_listen, fromStringz(strerror(errno)));
             exit(1);
         }
         // use random port if 0
@@ -284,7 +284,7 @@ protected:
                 null,
             this.local_port.netnum);
         if (sock < 0) {
-            stderr.writefln("Couldn't create connection (err=%d): %s", sock, strerror(errno));
+            stderr.writefln("Couldn't create connection (err=%d): %s", sock, fromStringz(strerror(errno)));
             exit(1);
         }
         // wait for something to happen
@@ -300,11 +300,11 @@ protected:
             assert(FD_ISSET(sock, &outs));
             ret = getsockopt(sock, SOL_SOCKET, SO_ERROR, &get_ret, &get_len);
             if (ret < 0) {
-                stderr.writefln("Critical system request failed: %s", strerror(errno));
+                stderr.writefln("Critical system request failed: %s", fromStringz(strerror(errno)));
                 exit(1);
             }
             assert(get_len == get_ret.sizeof);
-            debug (2) { ("Connection returned errcode=%d (%s)", get_ret, strerror(get_ret)); }
+            debug (2) { ("Connection returned errcode=%d (%s)", get_ret, fromStringz(strerror(get_ret))); }
             if (get_ret > 0) {
                 // expecting eof
                 byte temp;
@@ -320,7 +320,7 @@ protected:
         }
         // select failed
         else if (ret < 0) {
-            if (errno != EINTR) { stderr.writefln("Critical system request failed: %s", strerror(errno)); }
+            if (errno != EINTR) { stderr.writefln("Critical system request failed: %s", fromStringz(strerror(errno))); }
             exit(1);
         }
         // select timed out

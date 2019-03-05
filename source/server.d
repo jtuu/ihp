@@ -32,7 +32,7 @@ void listener_worker(Tid parent) {
             Socket *listen_sock = new Socket(CoreProtocol.IPv4, TransportProtocol.TCP);
             const int accept_ret = listen_sock.listen(5555);
             if (accept_ret < 0) {
-                stderr.writefln("Listen failed: %s", strerror(errno));
+                stderr.writefln("Listen failed: %s", fromStringz(strerror(errno)));
                 exit(1);
             }
             socks[num_socks_now] = listen_sock;
